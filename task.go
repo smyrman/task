@@ -83,7 +83,7 @@ func (e *Executor) Run(args ...string) error {
 	}
 
 	for _, a := range args {
-		if err := e.RunTask(context.Background(), a); err != nil {
+		if err := e.RunTask(context.Background(), &Call{Name: a}); err != nil {
 			return err
 		}
 	}
@@ -91,52 +91,56 @@ func (e *Executor) Run(args ...string) error {
 }
 
 // RunTask runs a task by its name
-func (e *Executor) RunTask(ctx context.Context, name string) error {
-	t, ok := e.Tasks[name]
+func (e *Executor) RunTask(ctx context.Context, call *Call) error {
+	t, ok := e.Tasks[call.Name]
 	if !ok {
-		return &taskNotFoundError{name}
+		return &taskNotFoundError{call.Name}
 	}
 
-	if err := e.runDeps(ctx, name); err != nil {
+	if err := e.runDeps(ctx, call); err != nil {
 		return err
 	}
 
 	if !e.Force {
-		upToDate, err := e.isTaskUpToDate(ctx, name)
+		upToDate, err := e.isTaskUpToDate(ctx, call)
 		if err != nil {
 			return err
 		}
 		if upToDate {
-			e.printfln(`task: Task "%s" is up to date`, name)
+			e.printfln(`task: Task "%s" is up to date`, call.Name)
 			return nil
 		}
 	}
 
 	for i := range t.Cmds {
-		if err := e.runCommand(ctx, name, i); err != nil {
-			return &taskRunError{name, err}
+		if err := e.runCommand(ctx, call, i); err != nil {
+			return &taskRunError{call.Name, err}
 		}
 	}
 	return nil
 }
 
-func (e *Executor) runDeps(ctx context.Context, task string) error {
+func (e *Executor) runDeps(ctx context.Context, call *Call) error {
 	g, ctx := errgroup.WithContext(ctx)
-	t := e.Tasks[task]
+	t := e.Tasks[call.Name]
 
 	for _, d := range t.Deps {
 		dep := d
 
 		g.Go(func() error {
-			dep, err := e.ReplaceVariables(task, dep)
+			dep, err := e.ReplaceVariables(call, dep)
 			if err != nil {
 				return err
 			}
 
-			if err = e.RunTask(ctx, dep); err != nil {
-				return err
+			if strings.HasPrefix(dep, "^") {
+				call, err := ParseCall(dep)
+				if err != nil {
+					return err
+				}
+				return e.RunTask(ctx, call)
 			}
-			return nil
+			return e.RunTask(ctx, &Call{Name: dep})
 		})
 	}
 
@@ -146,23 +150,23 @@ func (e *Executor) runDeps(ctx context.Context, task string) error {
 	return nil
 }
 
-func (e *Executor) isTaskUpToDate(ctx context.Context, task string) (bool, error) {
-	t := e.Tasks[task]
+func (e *Executor) isTaskUpToDate(ctx context.Context, call *Call) (bool, error) {
+	t := e.Tasks[call.Name]
 
 	if len(t.Status) > 0 {
-		return e.isUpToDateStatus(ctx, task)
+		return e.isUpToDateStatus(ctx, call)
 	}
-	return e.isUpToDateTimestamp(ctx, task)
+	return e.isUpToDateTimestamp(ctx, call)
 }
 
-func (e *Executor) isUpToDateStatus(ctx context.Context, task string) (bool, error) {
-	t := e.Tasks[task]
+func (e *Executor) isUpToDateStatus(ctx context.Context, call *Call) (bool, error) {
+	t := e.Tasks[call.Name]
 
-	environ, err := e.getEnviron(task)
+	environ, err := e.getEnviron(call)
 	if err != nil {
 		return false, err
 	}
-	dir, err := e.getTaskDir(task)
+	dir, err := e.getTaskDir(call)
 	if err != nil {
 		return false, err
 	}
@@ -181,23 +185,23 @@ func (e *Executor) isUpToDateStatus(ctx context.Context, task string) (bool, err
 	return true, nil
 }
 
-func (e *Executor) isUpToDateTimestamp(ctx context.Context, task string) (bool, error) {
-	t := e.Tasks[task]
+func (e *Executor) isUpToDateTimestamp(ctx context.Context, call *Call) (bool, error) {
+	t := e.Tasks[call.Name]
 
 	if len(t.Sources) == 0 || len(t.Generates) == 0 {
 		return false, nil
 	}
 
-	dir, err := e.getTaskDir(task)
+	dir, err := e.getTaskDir(call)
 	if err != nil {
 		return false, err
 	}
 
-	sources, err := e.ReplaceSliceVariables(task, t.Sources)
+	sources, err := e.ReplaceSliceVariables(call, t.Sources)
 	if err != nil {
 		return false, err
 	}
-	generates, err := e.ReplaceSliceVariables(task, t.Generates)
+	generates, err := e.ReplaceSliceVariables(call, t.Generates)
 	if err != nil {
 		return false, err
 	}
@@ -215,28 +219,28 @@ func (e *Executor) isUpToDateTimestamp(ctx context.Context, task string) (bool, 
 	return generatesMinTime.After(sourcesMaxTime), nil
 }
 
-func (e *Executor) runCommand(ctx context.Context, task string, i int) error {
-	t := e.Tasks[task]
+func (e *Executor) runCommand(ctx context.Context, call *Call, i int) error {
+	t := e.Tasks[call.Name]
 
-	c, err := e.ReplaceVariables(task, t.Cmds[i])
+	c, err := e.ReplaceVariables(call, t.Cmds[i])
 	if err != nil {
 		return err
 	}
 
 	if strings.HasPrefix(c, "^") {
-		c = strings.TrimPrefix(c, "^")
-		if err = e.RunTask(ctx, c); err != nil {
+		call, err := ParseCall(c)
+		if err != nil {
 			return err
 		}
-		return nil
+		return e.RunTask(ctx, call)
 	}
 
-	dir, err := e.getTaskDir(task)
+	dir, err := e.getTaskDir(call)
 	if err != nil {
 		return err
 	}
 
-	envs, err := e.getEnviron(task)
+	envs, err := e.getEnviron(call)
 	if err != nil {
 		return err
 	}
@@ -266,14 +270,14 @@ func (e *Executor) runCommand(ctx context.Context, task string, i int) error {
 	return nil
 }
 
-func (e *Executor) getTaskDir(name string) (string, error) {
-	t := e.Tasks[name]
+func (e *Executor) getTaskDir(call *Call) (string, error) {
+	t := e.Tasks[call.Name]
 
-	exeDir, err := e.ReplaceVariables(name, e.Dir)
+	exeDir, err := e.ReplaceVariables(call, e.Dir)
 	if err != nil {
 		return "", err
 	}
-	taskDir, err := e.ReplaceVariables(name, t.Dir)
+	taskDir, err := e.ReplaceVariables(call, t.Dir)
 	if err != nil {
 		return "", err
 	}
@@ -281,8 +285,8 @@ func (e *Executor) getTaskDir(name string) (string, error) {
 	return filepath.Join(exeDir, taskDir), nil
 }
 
-func (e *Executor) getEnviron(task string) ([]string, error) {
-	t := e.Tasks[task]
+func (e *Executor) getEnviron(call *Call) ([]string, error) {
+	t := e.Tasks[call.Name]
 
 	if t.Env == nil {
 		return nil, nil
@@ -291,7 +295,7 @@ func (e *Executor) getEnviron(task string) ([]string, error) {
 	envs := os.Environ()
 
 	for k, v := range t.Env {
-		env, err := e.ReplaceVariables(task, fmt.Sprintf("%s=%s", k, v))
+		env, err := e.ReplaceVariables(call, fmt.Sprintf("%s=%s", k, v))
 		if err != nil {
 			return nil, err
 		}

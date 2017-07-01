@@ -1,0 +1,12 @@
+default:
+  deps:
+    - ^write-file CONTENT=Dependence1 FILE=dep1.txt
+    - ^write-file CONTENT=Dependence2 FILE=dep2.txt
+  cmds:
+    - ^write-file CONTENT=Hello FILE=hello.txt
+    - ^write-file CONTENT=World FILE=world.txt
+    - ^write-file CONTENT=! FILE=exclamation.txt
+
+write-file:
+  cmds:
+    - echo {{.CONTENT}} > {{.FILE}}
